@@ -1,16 +1,16 @@
-# NPU-XCPLISE — Exynos Neural Probe v0.3
+# NPU-XCPLISE — Exynos Neural Probe v0.4
 
 Aplicativo experimental Android (Java + C++/NNAPI) para medir um **upscaler neural ESPCN 2×** usando o acelerador Samsung ENN no Galaxy S24 FE / Exynos 2400e.
 
-> **Status:** v0.1 testada no aparelho (dispositivo enn, convolução e DepthToSpace funcionando). A v0.2 foi executada no S24 FE: até 960×540→1920×1080 (média 59,466 ms em FP32). A v0.3 testa **FP16 real em tensores, buffers e pesos**, ainda sem validação no aparelho. Não é um módulo de upscaling do Winlator pronto.
+> **Status:** v0.1 testada no aparelho (dispositivo enn, convolução e DepthToSpace funcionando). A v0.2 foi executada no S24 FE: até 960×540→1920×1080 (média 59,466 ms em FP32). A v0.3 validou **FP16 real**, alcançando média de 30,040 ms (FP32 59,295 ms) na tarefa de 540p→1080p. **A v0.4 adiciona um teste de reutilização do objeto de execução NNAPI**, ainda sem validação no aparelho. Não é um módulo de upscaling do Winlator pronto.
 
 ## Funcionalidades
 
 - Identificação de aceleradores NNAPI (tipo, nome e versão).
 - Teste de referência 8×8 → 16×16, com pesos fixos (v0.1).
 - ESPCN 2× demonstrativo treinado: 2 convoluções 3×3, canais 3→12→12, ReLU e DepthToSpace.
-- Comparações FP32 x FP16 de 160×90→320×180, 320×180→640×360 e 480×270→960×540.
-- Comparação FP32 x FP16 separada de 960×540→1920×1080; pode consumir dezenas de MB e falhar se o driver não suportar o grafo em FP16.
+- Comparações FP32 x FP16 x FP16 reutilizável de 160×90→320×180, 320×180→640×360 e 480×270→960×540.
+- Comparação FP32 x FP16 x FP16 reutilizável separada de 960×540→1920×1080; pode consumir dezenas de MB e falhar se o driver não suportar o grafo em FP16.
 - Métricas: operações suportadas para cada precisão, tempo de compilação, compute NNAPI (média/p50/p90), quantidade de saídas finitas e bytes reais de entrada/saída. FP16 reduz a quantidade de bytes em ~50% em relação a FP32.
 - Exportação do relatório para TXT e seleção explícita do acelerador 'enn', sem fallback NNAPI automático para CPU.
 
@@ -61,3 +61,14 @@ Todos são tempos de inferência síncrona de um modelo ESPCN demonstrativo e en
 A v0.3 cria um grafo NNAPI com tipo **ANEURALNETWORKS_TENSOR_FLOAT16** para entrada, camadas, pesos e saída — não é apenas armazenamento FP16. Só compila e executa para o driver selecionado **enn** via ANeuralNetworksCompilation_createForDevices. Se alguma operação for recusada, o app informa e ignora a execução FP16 (sem fallback automático à CPU). O driver proprietário ainda pode ter estratégias internas não observáveis.
 
 A v0.3 **não implementa INT8** nem sincronização Vulkan, pois precisam de quantização calibrada e testes específicos de buffers. Usar FP16 pode acelerar ou não, dependendo do driver, da largura de banda e do overhead. O teste A/B fornece a medição.
+
+
+## v0.4 — Primeiro teste de escalonamento NNAPI
+
+Agora cada resolução testa **três caminhos** no mesmo modelo ESPCN: (1) FP32 criando uma execução por quadro, (2) FP16 criando uma execução por quadro e (3) FP16 com **ANeuralNetworksExecution_setReusable(true)**, compartilhando a mesma execução entre quadros sequenciais. O caminho reutilizável é API 31+; por segurança o Android mínimo foi elevado a 31, sendo compatível com o S24 FE Android 14.
+
+O teste reutilizável ainda usa buffers em memória comum e chamadas síncronas; **não** é DMA-BUF, não é zero-copy, não demonstra múltiplas unidades GNPU simultâneas e não deve acelerar em 2x só por reutilizar. Se o driver recusar, o relatório apresenta falha e mantém os testes tradicionais.
+
+A pesquisa de arquitetura, separando fatos e hipóteses de otimização, está em [docs/exynos2400-npu-architecture.md](docs/exynos2400-npu-architecture.md). O caminho de modelos potencialmente mais específico do Exynos é Exynos AI LiteCore / Exynos AI Studio, sujeito à disponibilidade de ferramentas e compatibilidade.
+
+**Importante:** NNAPI está depreciada em versões recentes do Android. Nossa implementação é uma prova de conceito funcional no dispositivo existente; para evolução de longo prazo vale pesquisar LiteRT/ExecuTorch + backend Exynos.
