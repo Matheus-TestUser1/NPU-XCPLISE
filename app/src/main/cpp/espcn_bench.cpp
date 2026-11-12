@@ -64,6 +64,13 @@ static float fp16toFloat(uint16_t bits) {
     return sign*std::ldexp(1.0f+float(mantissa)/1024.0f,exponent-15);
 }
 
+static uint16_t floatToHalf(float value) {
+    const __fp16 h = static_cast<__fp16>(value);
+    uint16_t bits=0;
+    std::memcpy(&bits,&h,sizeof(bits));
+    return bits;
+}
+
 struct Weights {
     std::vector<float> w1,b1,w2,b2;
 };
@@ -128,10 +135,11 @@ struct Model {
     }
 };
 
-static int tensor(ANeuralNetworksModel* model,std::initializer_list<uint32_t> dims) {
+static int tensor(ANeuralNetworksModel* model,std::initializer_list<uint32_t> dims,bool fp16) {
     std::vector<uint32_t> shape(dims);
     ANeuralNetworksOperandType type={
-        ANEURALNETWORKS_TENSOR_FLOAT32,uint32_t(shape.size()),shape.data(),0.0f,0
+        fp16 ? ANEURALNETWORKS_TENSOR_FLOAT16 : ANEURALNETWORKS_TENSOR_FLOAT32,
+        uint32_t(shape.size()),shape.data(),0.0f,0
     };
     return ANeuralNetworksModel_addOperand(model,&type);
 }
@@ -144,30 +152,38 @@ static int scalar(ANeuralNetworksModel* model,int32_t value,int index) {
 }
 
 static bool buildModel(Model& holder,Weights& weights,const ANeuralNetworksDevice* device,
-                       uint32_t width,uint32_t height,std::ostringstream& out) {
+                       uint32_t width,uint32_t height,bool fp16,std::ostringstream& out) {
     int rc=ANeuralNetworksModel_create(&holder.model);
     if(rc){out<<"create: "<<statusName(rc)<<"\n";return false;}
     auto* m=holder.model;
     const std::array<int,17> errors={
-        tensor(m,{1,height,width,3}),                   // 0 input NHWC
-        tensor(m,{kFeatures,3,3,3}),                   // 1 conv1 weights OHWI
-        tensor(m,{kFeatures}),                         // 2 conv1 bias
+        tensor(m,{1,height,width,3},fp16),                   // 0 input NHWC
+        tensor(m,{kFeatures,3,3,3},fp16),                   // 1 conv1 weights OHWI
+        tensor(m,{kFeatures},fp16),                         // 2 conv1 bias
         scalar(m,1,3),scalar(m,1,4),scalar(m,1,5),scalar(m,1,6), // SAME/stride/RELU
-        tensor(m,{1,height,width,kFeatures}),         // 7 conv1 output
-        tensor(m,{12,3,3,kFeatures}),                 // 8 conv2 weights
-        tensor(m,{12}),                               // 9 conv2 bias
+        tensor(m,{1,height,width,kFeatures},fp16),         // 7 conv1 output
+        tensor(m,{12,3,3,kFeatures},fp16),                 // 8 conv2 weights
+        tensor(m,{12},fp16),                               // 9 conv2 bias
         scalar(m,1,10),scalar(m,1,11),scalar(m,1,12),scalar(m,0,13), // SAME/stride/NONE
-        tensor(m,{1,height,width,12}),                // 14 conv2 output
+        tensor(m,{1,height,width,12},fp16),                // 14 conv2 output
         scalar(m,2,15),                               // 15 block size
-        tensor(m,{1,height*2,width*2,3})              // 16 RGB upscaled
+        tensor(m,{1,height*2,width*2,3},fp16)              // 16 RGB upscaled
     };
     for(int e:errors)if(e){out<<"operand: "<<statusName(e)<<"\n";return false;}
     const std::array<std::pair<int,const std::vector<float>*>,4> values={{
         {1,&weights.w1},{2,&weights.b1},{8,&weights.w2},{9,&weights.b2}
     }};
     for(const auto& v:values){
-        rc=ANeuralNetworksModel_setOperandValue(m,v.first,v.second->data(),
-                                               v.second->size()*sizeof(float));
+        if(fp16) {
+            std::vector<uint16_t> halfWeights;
+            halfWeights.reserve(v.second->size());
+            for(float value:*v.second)halfWeights.push_back(floatToHalf(value));
+            rc=ANeuralNetworksModel_setOperandValue(m,v.first,halfWeights.data(),
+                                                   halfWeights.size()*sizeof(uint16_t));
+        } else {
+            rc=ANeuralNetworksModel_setOperandValue(m,v.first,v.second->data(),
+                                                   v.second->size()*sizeof(float));
+        }
         if(rc){out<<"pesos: "<<statusName(rc)<<"\n";return false;}
     }
     const uint32_t c1[]={0,1,2,3,4,5,6}, c2[]={7,8,9,10,11,12,13}, d2s[]={14,15};
@@ -181,7 +197,7 @@ static bool buildModel(Model& holder,Weights& weights,const ANeuralNetworksDevic
     bool supported[3]={false,false,false};
     rc=ANeuralNetworksModel_getSupportedOperationsForDevices(m,&device,1,supported);
     if(rc){out<<"getSupportedOperations: "<<statusName(rc)<<"\n";return false;}
-    out<<"Operacoes suportadas: conv1="<<supported[0]<<" conv2="<<supported[1]
+    out<<"Precision="<<(fp16?"FP16":"FP32")<<" | Operacoes suportadas: conv1="<<supported[0]<<" conv2="<<supported[1]
        <<" depth_to_space="<<supported[2]<<"\n";
     if(!supported[0]||!supported[1]||!supported[2]){
         out<<"SKIP: ENN nao suporta este grafo. Sem fallback CPU.\n";return false;
@@ -217,27 +233,49 @@ static const ANeuralNetworksDevice* findEnn(std::ostringstream& out) {
 }
 
 static void benchmarkOne(const ANeuralNetworksDevice* device,Weights& weights,
-                         uint32_t width,uint32_t height,int measured,std::ostringstream& out) {
-    out<<"\n=== ESPCN "<<width<<"x"<<height<<" -> "<<width*2<<"x"<<height*2<<" ===\n";
+                         uint32_t width,uint32_t height,int measured,bool fp16,std::ostringstream& out) {
+    out<<"\n=== ESPCN "<<(fp16?"FP16 ":"FP32 ")<<width<<"x"<<height<<" -> "<<width*2<<"x"<<height*2<<" ===\n";
     Model m;
-    if(!buildModel(m,weights,device,width,height,out))return;
+    if(!buildModel(m,weights,device,width,height,fp16,out))return;
     const size_t inCount=size_t(width)*height*3;
     const size_t outCount=inCount*4;
-    std::vector<float> input(inCount),output(outCount);
+    std::vector<float> input32,output32;
+    std::vector<uint16_t> input16,output16;
+    if(fp16) {
+        input16.resize(inCount);
+        output16.resize(outCount);
+    } else {
+        input32.resize(inCount);
+        output32.resize(outCount);
+    }
     for(uint32_t y=0;y<height;++y)for(uint32_t x=0;x<width;++x){
         size_t i=(size_t(y)*width+x)*3;
-        input[i]=float(x)/std::max(1u,width-1);
-        input[i+1]=float(y)/std::max(1u,height-1);
-        input[i+2]=(((x/8)^(y/8))&1)?0.35f:0.75f;
+        const float v0=float(x)/std::max(1u,width-1);
+        const float v1=float(y)/std::max(1u,height-1);
+        const float v2=(((x/8)^(y/8))&1)?0.35f:0.75f;
+        if(fp16) {
+            input16[i]=floatToHalf(v0);
+            input16[i+1]=floatToHalf(v1);
+            input16[i+2]=floatToHalf(v2);
+        } else {
+            input32[i]=v0;
+            input32[i+1]=v1;
+            input32[i+2]=v2;
+        }
     }
+    const size_t elementBytes=fp16?sizeof(uint16_t):sizeof(float);
+    const void* inputPtr=fp16?static_cast<const void*>(input16.data()):
+                               static_cast<const void*>(input32.data());
+    void* outputPtr=fp16?static_cast<void*>(output16.data()):
+                           static_cast<void*>(output32.data());
     std::vector<double> times;
     const int warmups=2;
     for(int n=0;n<warmups+measured;++n) {
         ANeuralNetworksExecution* execution=nullptr;
         int rc=ANeuralNetworksExecution_create(m.compilation,&execution);
         if(rc||!execution){out<<"execution_create: "<<statusName(rc)<<"\n";break;}
-        rc=ANeuralNetworksExecution_setInput(execution,0,nullptr,input.data(),inCount*sizeof(float));
-        if(!rc)rc=ANeuralNetworksExecution_setOutput(execution,0,nullptr,output.data(),outCount*sizeof(float));
+        rc=ANeuralNetworksExecution_setInput(execution,0,nullptr,inputPtr,inCount*elementBytes);
+        if(!rc)rc=ANeuralNetworksExecution_setOutput(execution,0,nullptr,outputPtr,outCount*elementBytes);
         auto start=std::chrono::steady_clock::now();
         if(!rc)rc=ANeuralNetworksExecution_compute(execution);
         auto end=std::chrono::steady_clock::now();
@@ -251,7 +289,7 @@ static void benchmarkOne(const ANeuralNetworksDevice* device,Weights& weights,
     int finite=0;
     float minimum=INFINITY, maximum=-INFINITY;
     for(size_t i=0;i<outCount;i+=std::max<size_t>(1,outCount/2048)){
-        float v=output[i];
+        float v=fp16?fp16toFloat(output16[i]):output32[i];
         if(std::isfinite(v)){++finite;minimum=std::min(minimum,v);maximum=std::max(maximum,v);}
     }
     out<<std::fixed<<std::setprecision(3);
@@ -260,14 +298,14 @@ static void benchmarkOne(const ANeuralNetworksDevice* device,Weights& weights,
        <<" ms | p90="<<times[(times.size()-1)*9/10]<<" ms\n";
     out<<"Min/Max="<<times.front()<<" / "<<times.back()<<" ms\n";
     out<<"Amostras finitas="<<finite<<" intervalo="<<minimum<<" a "<<maximum<<"\n";
-    out<<"Entrada bytes="<<inCount*sizeof(float)<<" saida bytes="<<outCount*sizeof(float)<<"\n";
+    out<<"Entrada bytes="<<inCount*elementBytes<<" saida bytes="<<outCount*elementBytes<<"\n";
     out<<"Nao inclui compilacao nem renderizacao Vulkan/Winlator. Inclui NNAPI compute sincrono.\n";
 }
 
 static std::string run(JNIEnv* env,jobject assets,bool full) {
     std::ostringstream out;
-    out<<"EXYNOS ESPCN 2X v0.2 — rede demonstrativa TREINADA\n";
-    out<<"2x Conv3x3 (3->12->12), ReLU, DepthToSpace. FP32, pesos armazenados FP16.\n";
+    out<<"EXYNOS ESPCN 2X v0.3 — comparacao FP32 vs FP16 (ENN)\n";
+    out<<"2x Conv3x3 (3->12->12), ReLU, DepthToSpace. Pesos armazenados FP16.\n";
     out<<"Entradas sinteticas. Nao e FSR temporal nem jogo real.\n";
     out<<"Sem root, sem alteracao de clocks, sem fallback NNAPI CPU.\n";
     auto* device=findEnn(out);
@@ -278,12 +316,16 @@ static std::string run(JNIEnv* env,jobject assets,bool full) {
         out<<"Falha ao carregar pesos: "<<error<<"\n";return out.str();
     }
     out<<"Pesos: "<<(weights.w1.size()+weights.b1.size()+weights.w2.size()+weights.b2.size())
-       <<" valores FP16 convertidos para FP32.\n";
-    if(full)benchmarkOne(device,weights,960,540,5,out);
-    else {
-        benchmarkOne(device,weights,160,90,8,out);
-        benchmarkOne(device,weights,320,180,8,out);
-        benchmarkOne(device,weights,480,270,5,out);
+       <<" valores FP16 armazenados no asset.\n";
+    if(full) {
+        benchmarkOne(device,weights,960,540,5,false,out);
+        benchmarkOne(device,weights,960,540,5,true,out);
+    } else {
+        for(const auto& item:std::array<std::pair<uint32_t,uint32_t>,3>{{{160,90},{320,180},{480,270}}}) {
+            const int measured=item.first==480?5:8;
+            benchmarkOne(device,weights,item.first,item.second,measured,false,out);
+            benchmarkOne(device,weights,item.first,item.second,measured,true,out);
+        }
     }
     out<<"\nAVISO: latencia do modelo demonstrativo, nao desempenho final de jogos.\n";
     return out.str();
