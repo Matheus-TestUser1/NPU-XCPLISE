@@ -10,6 +10,7 @@
 #include <cstring>
 #include <iomanip>
 #include <initializer_list>
+#include <limits>
 #include <numeric>
 #include <sstream>
 #include <string>
@@ -312,6 +313,12 @@ static void benchmarkOne(const ANeuralNetworksDevice* device,const Weights& weig
             rc=ANeuralNetworksExecution_setInput(execution,0,nullptr,inputPtr,inCount*elementBytes);
             if(!rc)rc=ANeuralNetworksExecution_setOutput(execution,0,nullptr,outputPtr,outCount*elementBytes);
         }
+        // Diagnostic only: poison output before the LAST execution, outside timing.
+        // An untouched NaN sentinel suggests that the driver did not populate every pixel.
+        if(n==warmups+measured-1 && rc==ANEURALNETWORKS_NO_ERROR) {
+            if(fp16)std::fill(output16.begin(),output16.end(),static_cast<uint16_t>(0x7e00));
+            else std::fill(output32.begin(),output32.end(),std::numeric_limits<float>::quiet_NaN());
+        }
         auto start=std::chrono::steady_clock::now();
         if(!rc)rc=ANeuralNetworksExecution_compute(execution);
         auto end=std::chrono::steady_clock::now();
@@ -323,18 +330,44 @@ static void benchmarkOne(const ANeuralNetworksDevice* device,const Weights& weig
     if(times.empty()){out<<"Nenhuma inferencia medida.\n";return;}
     std::sort(times.begin(),times.end());
     const double mean=std::accumulate(times.begin(),times.end(),0.0)/times.size();
-    int finite=0;
+    // Validate EVERY component of output (outside timed inference).
+    size_t finite=0, nonfinite=0, untouched=0, outliers=0;
     float minimum=INFINITY, maximum=-INFINITY;
-    for(size_t i=0;i<outCount;i+=std::max<size_t>(1,outCount/2048)){
-        float v=fp16?fp16toFloat(output16[i]):output32[i];
-        if(std::isfinite(v)){++finite;minimum=std::min(minimum,v);maximum=std::max(maximum,v);}
+    size_t firstBad=outCount;
+    for(size_t i=0;i<outCount;++i){
+        if(fp16 && output16[i]==0x7e00u)++untouched;
+        const float v=fp16?fp16toFloat(output16[i]):output32[i];
+        if(!std::isfinite(v)) {
+            ++nonfinite;
+            if(firstBad==outCount)firstBad=i;
+            continue;
+        }
+        ++finite;
+        minimum=std::min(minimum,v);
+        maximum=std::max(maximum,v);
+        // Diagnostic threshold for unit-range RGB input, not a general NNAPI constraint.
+        if(std::abs(v)>2.0f) {
+            ++outliers;
+            if(firstBad==outCount)firstBad=i;
+        }
     }
     out<<std::fixed<<std::setprecision(3);
     out<<"Inferencias medidas="<<times.size()<<" (warmups=2)\n";
     out<<"Compute medio="<<mean<<" ms | p50="<<times[times.size()/2]
        <<" ms | p90="<<times[(times.size()-1)*9/10]<<" ms\n";
     out<<"Min/Max="<<times.front()<<" / "<<times.back()<<" ms\n";
-    out<<"Amostras finitas="<<finite<<" intervalo="<<minimum<<" a "<<maximum<<"\n";
+    out<<"Validacao COMPLETA RGB 2x: componentes="<<outCount
+       <<" finitos="<<finite<<" nao_finitos="<<nonfinite
+       <<" sentinelas_NaN="<<untouched<<" abs_maior_2="<<outliers<<"\n";
+    if(finite>0)out<<"Intervalo de saida FINITA="<<minimum<<" a "<<maximum<<"\n";
+    if(firstBad!=outCount) {
+        const size_t index=firstBad/3;
+        const size_t dstWidth=static_cast<size_t>(width)*2;
+        out<<"Primeiro elemento suspeito: x="<<(index%dstWidth)
+           <<" y="<<(index/dstWidth)<<" canal="<<(firstBad%3)<<"\n";
+    }
+    out<<"VALIDACAO_NUMERICA="<<(nonfinite==0&&outliers==0?"SEM_ANOMALIAS_BASICAS":"FALHA")
+       <<" (nao avalia fidelidade/PSNR).\n";
     out<<"Entrada bytes="<<inCount*elementBytes<<" saida bytes="<<outCount*elementBytes<<"\n";
     out<<"Nao inclui compilacao nem renderizacao Vulkan/Winlator. Inclui NNAPI compute sincrono.\n";
 }
