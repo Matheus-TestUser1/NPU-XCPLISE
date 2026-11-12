@@ -47,7 +47,7 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView intro = new TextView(this);
-        intro.setText("Prova de execução na NPU Samsung ENN pelo NNAPI. Sem root e sem modificar drivers ou clocks. O teste antigo usa pesos fixos. ESPCN v0.3 compara tensores FP32 e FP16 reais no ENN, usando rede demonstrativa treinada e entradas sintéticas.");
+        intro.setText("Prova de execução na NPU Samsung ENN pelo NNAPI. Sem root e sem modificar drivers ou clocks. O teste antigo usa pesos fixos. ESPCN v0.4 compara FP32, FP16 e FP16 com execução reutilizável no ENN, usando rede demonstrativa treinada e entradas sintéticas.");
         intro.setTextSize(14);
         intro.setPadding(0, 12, 0, 14);
         intro.setTextColor(Color.DKGRAY);
@@ -55,8 +55,8 @@ public class MainActivity extends Activity {
 
         listButton = makeButton("1. Identificar aceleradores", root);
         testButton = makeButton("2. Executar testes NPU / 2x", root);
-        espcnSmallButton = makeButton("3. Comparar FP32 x FP16 — 90p / 180p / 270p", root);
-        espcnFullButton = makeButton("4. Comparar FP32 x FP16 — 540p → 1080p", root);
+        espcnSmallButton = makeButton("3. FP32 / FP16 / reuso — 90p a 270p", root);
+        espcnFullButton = makeButton("4. FP32 / FP16 / reuso — 540p a 1080p", root);
         saveButton = makeButton("5. Exportar relatório .TXT", root);
         listButton.setOnClickListener(v -> runTask(() -> NativeProbe.listDevices()));
         testButton.setOnClickListener(v -> runTask(() -> NativeProbe.runNNAPITest()));
@@ -74,7 +74,7 @@ public class MainActivity extends Activity {
         scroll.addView(logView);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         setContentView(root);
-        addLine("Exynos Neural Probe 0.3 — S24 FE / Android 14");
+        addLine("Exynos Neural Probe 0.4 — S24 FE / Android 14");
         addLine("Execute a identificação antes do teste.\n");
     }
 
