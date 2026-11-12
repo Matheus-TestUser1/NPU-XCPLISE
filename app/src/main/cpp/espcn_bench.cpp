@@ -1,0 +1,292 @@
+#include <jni.h>
+#include <android/asset_manager.h>
+#include <android/asset_manager_jni.h>
+#include <android/NeuralNetworks.h>
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <iomanip>
+#include <numeric>
+#include <sstream>
+#include <string>
+#include <vector>
+
+namespace {
+
+constexpr uint32_t kFeatures = 12;
+constexpr uint32_t kScale = 2;
+
+static std::string statusName(int code) {
+    return "NNAPI status=" + std::to_string(code);
+}
+
+static std::vector<uint8_t> decodeBase64(const std::string& source) {
+    auto digit=[](char c)->int {
+        if(c>='A'&&c<='Z')return c-'A';
+        if(c>='a'&&c<='z')return c-'a'+26;
+        if(c>='0'&&c<='9')return c-'0'+52;
+        if(c=='+')return 62;
+        if(c=='/')return 63;
+        return -1;
+    };
+    std::vector<uint8_t> bytes;
+    uint32_t current=0;
+    int bits=0;
+    for(char c:source) {
+        if(c=='=')break;
+        int value=digit(c);
+        if(value<0)continue;
+        current=(current<<6)|static_cast<uint32_t>(value);
+        bits+=6;
+        if(bits>=8){
+            bits-=8;
+            bytes.push_back(static_cast<uint8_t>((current>>bits)&255));
+        }
+    }
+    return bytes;
+}
+
+static uint32_t u32le(const uint8_t* p) {
+    return uint32_t(p[0])|(uint32_t(p[1])<<8)|(uint32_t(p[2])<<16)|(uint32_t(p[3])<<24);
+}
+
+static float fp16toFloat(uint16_t bits) {
+    const float sign=(bits&0x8000)?-1.0f:1.0f;
+    const int exponent=(bits>>10)&31;
+    const int mantissa=bits&1023;
+    if(exponent==0)return sign*std::ldexp(float(mantissa),-24);
+    if(exponent==31)return mantissa?NAN:sign*INFINITY;
+    return sign*std::ldexp(1.0f+float(mantissa)/1024.0f,exponent-15);
+}
+
+struct Weights {
+    std::vector<float> w1,b1,w2,b2;
+};
+
+static bool loadWeights(JNIEnv* env,jobject javaAssets,Weights& result,std::string& error) {
+    if(javaAssets==nullptr){error="AssetManager ausente";return false;}
+    AAssetManager* manager=AAssetManager_fromJava(env,javaAssets);
+    if(!manager){error="Falha ao obter AssetManager";return false;}
+    AAsset* asset=AAssetManager_open(manager,"espcn2x_fp16.b64",AASSET_MODE_BUFFER);
+    if(!asset){error="Modelo espcn2x_fp16.b64 ausente";return false;}
+    const off_t size=AAsset_getLength(asset);
+    if(size<=0||size>128*1024){
+        AAsset_close(asset);error="Tamanho de modelo invalido";return false;
+    }
+    std::string encoded(static_cast<size_t>(size),'\0');
+    int received=AAsset_read(asset,&encoded[0],static_cast<size_t>(size));
+    AAsset_close(asset);
+    if(received!=size){error="Erro ao ler modelo";return false;}
+    auto bytes=decodeBase64(encoded);
+    if(bytes.size()<28||std::memcmp(bytes.data(),"ESPCN2X1",8)!=0){
+        error="Assinatura ou versao do modelo incorreta";return false;
+    }
+    const uint32_t features=u32le(bytes.data()+8);
+    const std::array<uint32_t,4> counts={
+        u32le(bytes.data()+12),u32le(bytes.data()+16),
+        u32le(bytes.data()+20),u32le(bytes.data()+24)
+    };
+    const std::array<uint32_t,4> expected={
+        kFeatures*3*3*3,kFeatures,3*kScale*kScale*3*3*kFeatures,3*kScale*kScale
+    };
+    if(features!=kFeatures||counts!=expected){
+        error="Dimensoes dos pesos inesperadas";return false;
+    }
+    size_t total=std::accumulate(counts.begin(),counts.end(),size_t(0));
+    if(bytes.size()!=28+2*total){error="Comprimento dos pesos inconsistente";return false;}
+    size_t offset=28;
+    std::array<std::vector<float>*,4> arrays={&result.w1,&result.b1,&result.w2,&result.b2};
+    for(size_t a=0;a<4;++a){
+        auto& v=*arrays[a];v.reserve(counts[a]);
+        for(uint32_t i=0;i<counts[a];++i){
+            uint16_t half=uint16_t(bytes[offset]|(bytes[offset+1]<<8));
+            offset+=2;
+            float value=fp16toFloat(half);
+            if(!std::isfinite(value)){error="Peso nao-finito";return false;}
+            v.push_back(value);
+        }
+    }
+    return true;
+}
+
+struct Model {
+    ANeuralNetworksModel* model=nullptr;
+    ANeuralNetworksCompilation* compilation=nullptr;
+    ~Model(){
+        if(compilation)ANeuralNetworksCompilation_free(compilation);
+        if(model)ANeuralNetworksModel_free(model);
+    }
+};
+
+static int tensor(ANeuralNetworksModel* model,std::initializer_list<uint32_t> dims) {
+    std::vector<uint32_t> shape(dims);
+    ANeuralNetworksOperandType type={
+        ANEURALNETWORKS_TENSOR_FLOAT32,uint32_t(shape.size()),shape.data(),0.0f,0
+    };
+    return ANeuralNetworksModel_addOperand(model,&type);
+}
+
+static int scalar(ANeuralNetworksModel* model,int32_t value,int index) {
+    ANeuralNetworksOperandType type={ANEURALNETWORKS_INT32,0,nullptr,0.0f,0};
+    int rc=ANeuralNetworksModel_addOperand(model,&type);
+    if(rc)return rc;
+    return ANeuralNetworksModel_setOperandValue(model,index,&value,sizeof(value));
+}
+
+static bool buildModel(Model& holder,Weights& weights,const ANeuralNetworksDevice* device,
+                       uint32_t width,uint32_t height,std::ostringstream& out) {
+    int rc=ANeuralNetworksModel_create(&holder.model);
+    if(rc){out<<"create: "<<statusName(rc)<<"\n";return false;}
+    auto* m=holder.model;
+    const std::array<int,17> errors={
+        tensor(m,{1,height,width,3}),                   // 0 input NHWC
+        tensor(m,{kFeatures,3,3,3}),                   // 1 conv1 weights OHWI
+        tensor(m,{kFeatures}),                         // 2 conv1 bias
+        scalar(m,1,3),scalar(m,1,4),scalar(m,1,5),scalar(m,1,6), // SAME/stride/RELU
+        tensor(m,{1,height,width,kFeatures}),         // 7 conv1 output
+        tensor(m,{12,3,3,kFeatures}),                 // 8 conv2 weights
+        tensor(m,{12}),                               // 9 conv2 bias
+        scalar(m,1,10),scalar(m,1,11),scalar(m,1,12),scalar(m,0,13), // SAME/stride/NONE
+        tensor(m,{1,height,width,12}),                // 14 conv2 output
+        scalar(m,2,15),                               // 15 block size
+        tensor(m,{1,height*2,width*2,3})              // 16 RGB upscaled
+    };
+    for(int e:errors)if(e){out<<"operand: "<<statusName(e)<<"\n";return false;}
+    const std::array<std::pair<int,const std::vector<float>*>,4> values={{
+        {1,&weights.w1},{2,&weights.b1},{8,&weights.w2},{9,&weights.b2}
+    }};
+    for(const auto& v:values){
+        rc=ANeuralNetworksModel_setOperandValue(m,v.first,v.second->data(),
+                                               v.second->size()*sizeof(float));
+        if(rc){out<<"pesos: "<<statusName(rc)<<"\n";return false;}
+    }
+    const uint32_t c1[]={0,1,2,3,4,5,6}, c2[]={7,8,9,10,11,12,13}, d2s[]={14,15};
+    const uint32_t o1[]={7},o2[]={14},o3[]={16},input[]={0};
+    rc=ANeuralNetworksModel_addOperation(m,ANEURALNETWORKS_CONV_2D,7,c1,1,o1);
+    if(!rc)rc=ANeuralNetworksModel_addOperation(m,ANEURALNETWORKS_CONV_2D,7,c2,1,o2);
+    if(!rc)rc=ANeuralNetworksModel_addOperation(m,ANEURALNETWORKS_DEPTH_TO_SPACE,2,d2s,1,o3);
+    if(!rc)rc=ANeuralNetworksModel_identifyInputsAndOutputs(m,1,input,1,o3);
+    if(!rc)rc=ANeuralNetworksModel_finish(m);
+    if(rc){out<<"model/ops: "<<statusName(rc)<<"\n";return false;}
+    bool supported[3]={false,false,false};
+    rc=ANeuralNetworksModel_getSupportedOperationsForDevices(m,&device,1,supported);
+    if(rc){out<<"getSupportedOperations: "<<statusName(rc)<<"\n";return false;}
+    out<<"Operacoes suportadas: conv1="<<supported[0]<<" conv2="<<supported[1]
+       <<" depth_to_space="<<supported[2]<<"\n";
+    if(!supported[0]||!supported[1]||!supported[2]){
+        out<<"SKIP: ENN nao suporta este grafo. Sem fallback CPU.\n";return false;
+    }
+    rc=ANeuralNetworksCompilation_createForDevices(m,&device,1,&holder.compilation);
+    if(rc){out<<"createForDevices: "<<statusName(rc)<<"\n";return false;}
+    ANeuralNetworksCompilation_setPreference(holder.compilation,ANEURALNETWORKS_PREFER_FAST_SINGLE_ANSWER);
+    auto t0=std::chrono::steady_clock::now();
+    rc=ANeuralNetworksCompilation_finish(holder.compilation);
+    auto t1=std::chrono::steady_clock::now();
+    out<<"Compilacao ms="<<std::chrono::duration<double,std::milli>(t1-t0).count()<<"\n";
+    if(rc){out<<"compilation_finish: "<<statusName(rc)<<"\n";return false;}
+    return true;
+}
+
+static const ANeuralNetworksDevice* findEnn(std::ostringstream& out) {
+    uint32_t count=0;
+    int rc=ANeuralNetworks_getDeviceCount(&count);
+    if(rc){out<<"getDeviceCount: "<<statusName(rc)<<"\n";return nullptr;}
+    for(uint32_t i=0;i<count;++i) {
+        ANeuralNetworksDevice* device=nullptr;
+        if(ANeuralNetworks_getDevice(i,&device)!=ANEURALNETWORKS_NO_ERROR||!device)continue;
+        const char* name=nullptr;
+        int32_t type=ANEURALNETWORKS_DEVICE_UNKNOWN;
+        ANeuralNetworksDevice_getName(device,&name);
+        ANeuralNetworksDevice_getType(device,&type);
+        if(name&&std::string(name)=="enn"&&type!=ANEURALNETWORKS_DEVICE_CPU){
+            out<<"Selecionado NNAPI: "<<name<<" tipo="<<type<<"\n";return device;
+        }
+    }
+    out<<"Dispositivo enn ausente. Nao executando na CPU.\n";
+    return nullptr;
+}
+
+static void benchmarkOne(const ANeuralNetworksDevice* device,Weights& weights,
+                         uint32_t width,uint32_t height,int measured,std::ostringstream& out) {
+    out<<"\n=== ESPCN "<<width<<"x"<<height<<" -> "<<width*2<<"x"<<height*2<<" ===\n";
+    Model m;
+    if(!buildModel(m,weights,device,width,height,out))return;
+    const size_t inCount=size_t(width)*height*3;
+    const size_t outCount=inCount*4;
+    std::vector<float> input(inCount),output(outCount);
+    for(uint32_t y=0;y<height;++y)for(uint32_t x=0;x<width;++x){
+        size_t i=(size_t(y)*width+x)*3;
+        input[i]=float(x)/std::max(1u,width-1);
+        input[i+1]=float(y)/std::max(1u,height-1);
+        input[i+2]=(((x/8)^(y/8))&1)?0.35f:0.75f;
+    }
+    std::vector<double> times;
+    const int warmups=2;
+    for(int n=0;n<warmups+measured;++n) {
+        ANeuralNetworksExecution* execution=nullptr;
+        int rc=ANeuralNetworksExecution_create(m.compilation,&execution);
+        if(rc||!execution){out<<"execution_create: "<<statusName(rc)<<"\n";break;}
+        rc=ANeuralNetworksExecution_setInput(execution,0,nullptr,input.data(),inCount*sizeof(float));
+        if(!rc)rc=ANeuralNetworksExecution_setOutput(execution,0,nullptr,output.data(),outCount*sizeof(float));
+        auto start=std::chrono::steady_clock::now();
+        if(!rc)rc=ANeuralNetworksExecution_compute(execution);
+        auto end=std::chrono::steady_clock::now();
+        ANeuralNetworksExecution_free(execution);
+        if(rc){out<<"Inferencia ciclo "<<n<<": "<<statusName(rc)<<"\n";break;}
+        if(n>=warmups)times.push_back(std::chrono::duration<double,std::milli>(end-start).count());
+    }
+    if(times.empty()){out<<"Nenhuma inferencia medida.\n";return;}
+    std::sort(times.begin(),times.end());
+    const double mean=std::accumulate(times.begin(),times.end(),0.0)/times.size();
+    int finite=0;
+    float minimum=INFINITY, maximum=-INFINITY;
+    for(size_t i=0;i<outCount;i+=std::max<size_t>(1,outCount/2048)){
+        float v=output[i];
+        if(std::isfinite(v)){++finite;minimum=std::min(minimum,v);maximum=std::max(maximum,v);}
+    }
+    out<<std::fixed<<std::setprecision(3);
+    out<<"Inferencias medidas="<<times.size()<<" (warmups=2)\n";
+    out<<"Compute medio="<<mean<<" ms | p50="<<times[times.size()/2]
+       <<" ms | p90="<<times[(times.size()-1)*9/10]<<" ms\n";
+    out<<"Min/Max="<<times.front()<<" / "<<times.back()<<" ms\n";
+    out<<"Amostras finitas="<<finite<<" intervalo="<<minimum<<" a "<<maximum<<"\n";
+    out<<"Entrada bytes="<<inCount*sizeof(float)<<" saida bytes="<<outCount*sizeof(float)<<"\n";
+    out<<"Nao inclui compilacao nem renderizacao Vulkan/Winlator. Inclui NNAPI compute sincrono.\n";
+}
+
+static std::string run(JNIEnv* env,jobject assets,bool full) {
+    std::ostringstream out;
+    out<<"EXYNOS ESPCN 2X v0.2 — rede demonstrativa TREINADA\n";
+    out<<"2x Conv3x3 (3->12->12), ReLU, DepthToSpace. FP32, pesos armazenados FP16.\n";
+    out<<"Entradas sinteticas. Nao e FSR temporal nem jogo real.\n";
+    out<<"Sem root, sem alteracao de clocks, sem fallback NNAPI CPU.\n";
+    auto* device=findEnn(out);
+    if(!device)return out.str();
+    Weights weights;
+    std::string error;
+    if(!loadWeights(env,assets,weights,error)){
+        out<<"Falha ao carregar pesos: "<<error<<"\n";return out.str();
+    }
+    out<<"Pesos: "<<(weights.w1.size()+weights.b1.size()+weights.w2.size()+weights.b2.size())
+       <<" valores FP16 convertidos para FP32.\n";
+    if(full)benchmarkOne(device,weights,960,540,5,out);
+    else {
+        benchmarkOne(device,weights,160,90,8,out);
+        benchmarkOne(device,weights,320,180,8,out);
+        benchmarkOne(device,weights,480,270,5,out);
+    }
+    out<<"\nAVISO: latencia do modelo demonstrativo, nao desempenho final de jogos.\n";
+    return out.str();
+}
+
+} // namespace
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_exynos_neuralprobe_NativeProbe_runESPCNBenchmark(JNIEnv* env,jclass,
+                                                           jobject assets,jboolean full) {
+    const std::string result=run(env,assets,full==JNI_TRUE);
+    return env->NewStringUTF(result.c_str());
+}
