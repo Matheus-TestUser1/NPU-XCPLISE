@@ -1,8 +1,8 @@
-# NPU-XCPLISE — Exynos Neural Probe v0.4
+# NPU-XCPLISE — Exynos Neural Probe v0.5
 
 Aplicativo experimental Android (Java + C++/NNAPI) para medir um **upscaler neural ESPCN 2×** usando o acelerador Samsung ENN no Galaxy S24 FE / Exynos 2400e.
 
-> **Status:** v0.1 testada no aparelho (dispositivo enn, convolução e DepthToSpace funcionando). A v0.2 foi executada no S24 FE: até 960×540→1920×1080 (média 59,466 ms em FP32). A v0.3 validou **FP16 real**, alcançando média de 30,040 ms (FP32 59,295 ms) na tarefa de 540p→1080p. **A v0.4 adiciona um teste de reutilização do objeto de execução NNAPI**, ainda sem validação no aparelho. Não é um módulo de upscaling do Winlator pronto.
+> **Status:** v0.1 testada no aparelho (dispositivo enn, convolução e DepthToSpace funcionando). A v0.2 foi executada no S24 FE: até 960×540→1920×1080 (média 59,466 ms em FP32). A v0.3 validou **FP16 real**, alcançando média de 30,040 ms (FP32 59,295 ms) na tarefa de 540p→1080p. **A v0.4 foi executada no S24 FE**: FP16 reutilizável 21,283 ms para 960×540→1920×1080, contra FP16 normal 30,248 ms. A **v0.5** adiciona testes de arquitetura 1×1 e 8/12 canais ainda sem validação no aparelho. Não é um módulo de upscaling do Winlator pronto.
 
 ## Funcionalidades
 
@@ -72,3 +72,20 @@ O teste reutilizável ainda usa buffers em memória comum e chamadas síncronas;
 A pesquisa de arquitetura, separando fatos e hipóteses de otimização, está em [docs/exynos2400-npu-architecture.md](docs/exynos2400-npu-architecture.md). O caminho de modelos potencialmente mais específico do Exynos é Exynos AI LiteCore / Exynos AI Studio, sujeito à disponibilidade de ferramentas e compatibilidade.
 
 **Importante:** NNAPI está depreciada em versões recentes do Android. Nossa implementação é uma prova de conceito funcional no dispositivo existente; para evolução de longo prazo vale pesquisar LiteRT/ExecuTorch + backend Exynos.
+
+
+## v0.5 — Buscando <16 ms no ESPCN 540p → 1080p
+
+Novo botão **5. LITE 1x1/8 canais — 90p a 270p** e botão **6. LITE 1x1/8 canais — 540p a 1080p**. Ambos fazem comparação A/B/C no mesmo driver **enn**, usando **FP16 e execução reutilizável**:
+
+| Variante | Convolução 1 | Convolução 2 | Características |
+|---|---|---|---|
+| BASELINE_12_K3 | 3×3, 3→12 canais | 3×3, 12→12 canais | Rede treinada original v0.4 |
+| LITE_12_K1 | 3×3, 3→12 canais | 1×1, 12→12 canais | Pesos centrais extraídos, **não retreinada** |
+| LITE_8_K1 | 3×3, 3→8 canais | 1×1, 8→12 canais | Pesos podados, **não retreinada** |
+
+As versões LITE_12_K1 e LITE_8_K1 são **apenas experimentos de arquitetura e tempo de inferência**. Seus pesos foram derivados matematicamente do modelo anterior sem treinamento novo; portanto **não representam upscalers visuais utilizáveis**. A próxima etapa, caso alguma configuração seja rápida, é treinar essa topologia no PyTorch e validar PSNR/SSIM e imagens reais antes de considerá-la.
+
+O objetivo de 16 ms em 1080p é uma **meta**, não um resultado. A v0.5 ainda não foi compilada/testada no S24 FE. Recomendação: executar o teste leve primeiro e depois o 1080p, e exportar `.txt`. Comparar médias e p50 entre as três opções, observando aquecimento e variação de clock.
+
+O FPS do Winlator exige GPU → NPU → GPU e sincronização; atingir 16 ms **somente na inferência** não garante 60 FPS finais. A API NNAPI foi depreciada no Android 15, mas o aparelho Android 14 com driver enn continua servindo como base experimental. Futuramente avaliar Exynos AI LiteCore / Exynos AI Studio e arquitetura mais adequada ao hardware Samsung.
