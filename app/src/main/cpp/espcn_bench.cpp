@@ -168,7 +168,7 @@ static int scalar(ANeuralNetworksModel* model,int32_t value,int index) {
     return ANeuralNetworksModel_setOperandValue(model,index,&value,sizeof(value));
 }
 
-static bool buildModel(Model& holder,Weights& weights,const ANeuralNetworksDevice* device,
+static bool buildModel(Model& holder,const Weights& weights,const ANeuralNetworksDevice* device,
                        uint32_t width,uint32_t height,bool fp16,uint32_t features,
                        uint32_t kernel2,std::ostringstream& out) {
     int rc=ANeuralNetworksModel_create(&holder.model);
@@ -250,7 +250,7 @@ static const ANeuralNetworksDevice* findEnn(std::ostringstream& out) {
     return nullptr;
 }
 
-static void benchmarkOne(const ANeuralNetworksDevice* device,Weights& weights,
+static void benchmarkOne(const ANeuralNetworksDevice* device,const Weights& weights,
                          uint32_t width,uint32_t height,int measured,bool fp16,bool reusable,std::ostringstream& out,
                          uint32_t features=kFeatures,uint32_t kernel2=3,
                          const char* tag="ORIGINAL") {
@@ -358,8 +358,8 @@ static std::string runLite(JNIEnv* env,jobject assets,bool full) {
     const auto bench=[&](uint32_t w,uint32_t h,int repeats) {
         benchmarkOne(device,source,w,h,repeats,true,true,out,12,3,"BASELINE_12_K3");
         // The benchmark only reads model weights; buildModel doesn't mutate them.
-        benchmarkOne(device,const_cast<Weights&>(lite12),w,h,repeats,true,true,out,12,1,"LITE_12_K1");
-        benchmarkOne(device,const_cast<Weights&>(lite8),w,h,repeats,true,true,out,8,1,"LITE_8_K1");
+        benchmarkOne(device,lite12,w,h,repeats,true,true,out,12,1,"LITE_12_K1");
+        benchmarkOne(device,lite8,w,h,repeats,true,true,out,8,1,"LITE_8_K1");
     };
     if(full)bench(960,540,7);
     else {
