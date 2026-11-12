@@ -28,6 +28,8 @@ public class MainActivity extends Activity {
     private Button listButton;
     private Button testButton;
     private Button saveButton;
+    private Button espcnSmallButton;
+    private Button espcnFullButton;
 
     @Override
     public void onCreate(Bundle state) {
@@ -45,7 +47,7 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView intro = new TextView(this);
-        intro.setText("Prova de execução na NPU Samsung ENN pelo NNAPI. Sem root e sem modificar drivers ou clocks. O grafo 2x utiliza pesos fixos: NÃO é ainda upscaling neural treinado.");
+        intro.setText("Prova de execução na NPU Samsung ENN pelo NNAPI. Sem root e sem modificar drivers ou clocks. O teste antigo usa pesos fixos. Os testes ESPCN v0.2 usam uma pequena rede treinada (experimental) e entradas sintéticas.");
         intro.setTextSize(14);
         intro.setPadding(0, 12, 0, 14);
         intro.setTextColor(Color.DKGRAY);
@@ -53,9 +55,13 @@ public class MainActivity extends Activity {
 
         listButton = makeButton("1. Identificar aceleradores", root);
         testButton = makeButton("2. Executar testes NPU / 2x", root);
-        saveButton = makeButton("3. Exportar relatório .TXT", root);
+        espcnSmallButton = makeButton("3. ESPCN 2x — 90p / 180p / 270p", root);
+        espcnFullButton = makeButton("4. ESPCN 2x — 540p → 1080p (pesado)", root);
+        saveButton = makeButton("5. Exportar relatório .TXT", root);
         listButton.setOnClickListener(v -> runTask(() -> NativeProbe.listDevices()));
         testButton.setOnClickListener(v -> runTask(() -> NativeProbe.runNNAPITest()));
+        espcnSmallButton.setOnClickListener(v -> runTask(() -> NativeProbe.runESPCNBenchmark(getAssets(), false)));
+        espcnFullButton.setOnClickListener(v -> runTask(() -> NativeProbe.runESPCNBenchmark(getAssets(), true)));
         saveButton.setOnClickListener(v -> saveReport());
 
         ScrollView scroll = new ScrollView(this);
@@ -68,7 +74,7 @@ public class MainActivity extends Activity {
         scroll.addView(logView);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         setContentView(root);
-        addLine("Exynos Neural Probe 0.1 — S24 FE / Android 14");
+        addLine("Exynos Neural Probe 0.2 — S24 FE / Android 14");
         addLine("Execute a identificação antes do teste.\n");
     }
 
@@ -89,6 +95,8 @@ public class MainActivity extends Activity {
     private void runTask(Callable<String> work) {
         listButton.setEnabled(false);
         testButton.setEnabled(false);
+        espcnSmallButton.setEnabled(false);
+        espcnFullButton.setEnabled(false);
         addLine("Executando... ");
         executor.execute(() -> {
             String result;
@@ -102,6 +110,8 @@ public class MainActivity extends Activity {
                 addLine(output + "\n");
                 listButton.setEnabled(true);
                 testButton.setEnabled(true);
+                espcnSmallButton.setEnabled(true);
+                espcnFullButton.setEnabled(true);
             });
         });
     }
