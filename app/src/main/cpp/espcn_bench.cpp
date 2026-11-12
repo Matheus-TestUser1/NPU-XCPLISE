@@ -75,6 +75,23 @@ struct Weights {
     std::vector<float> w1,b1,w2,b2;
 };
 
+// PERFORMANCE-ONLY ablation of trained ESPCN weights: not retrained!
+static Weights makePrunedWeights(const Weights& source,uint32_t features,uint32_t kernel2) {
+    Weights dst;
+    if(features<1 || features>kFeatures || (kernel2!=1 && kernel2!=3))return dst;
+    dst.w1.assign(source.w1.begin(),source.w1.begin()+features*27);
+    dst.b1.assign(source.b1.begin(),source.b1.begin()+features);
+    dst.b2=source.b2;
+    for(uint32_t oc=0;oc<12;++oc) {
+        const uint32_t offset=kernel2==1?1:0;
+        for(uint32_t y=0;y<kernel2;++y)
+            for(uint32_t x=0;x<kernel2;++x)
+                for(uint32_t ic=0;ic<features;++ic)
+                    dst.w2.push_back(source.w2[((oc*3+(y+offset))*3+(x+offset))*kFeatures+ic]);
+    }
+    return dst;
+}
+
 static bool loadWeights(JNIEnv* env,jobject javaAssets,Weights& result,std::string& error) {
     if(javaAssets==nullptr){error="AssetManager ausente";return false;}
     AAssetManager* manager=AAssetManager_fromJava(env,javaAssets);
@@ -152,17 +169,18 @@ static int scalar(ANeuralNetworksModel* model,int32_t value,int index) {
 }
 
 static bool buildModel(Model& holder,Weights& weights,const ANeuralNetworksDevice* device,
-                       uint32_t width,uint32_t height,bool fp16,std::ostringstream& out) {
+                       uint32_t width,uint32_t height,bool fp16,uint32_t features,
+                       uint32_t kernel2,std::ostringstream& out) {
     int rc=ANeuralNetworksModel_create(&holder.model);
     if(rc){out<<"create: "<<statusName(rc)<<"\n";return false;}
     auto* m=holder.model;
     const std::array<int,17> errors={
         tensor(m,{1,height,width,3},fp16),                   // 0 input NHWC
-        tensor(m,{kFeatures,3,3,3},fp16),                   // 1 conv1 weights OHWI
-        tensor(m,{kFeatures},fp16),                         // 2 conv1 bias
+        tensor(m,{features,3,3,3},fp16),                   // 1 conv1 weights OHWI
+        tensor(m,{features},fp16),                         // 2 conv1 bias
         scalar(m,1,3),scalar(m,1,4),scalar(m,1,5),scalar(m,1,6), // SAME/stride/RELU
-        tensor(m,{1,height,width,kFeatures},fp16),         // 7 conv1 output
-        tensor(m,{12,3,3,kFeatures},fp16),                 // 8 conv2 weights
+        tensor(m,{1,height,width,features},fp16),         // 7 conv1 output
+        tensor(m,{12,kernel2,kernel2,features},fp16),                 // 8 conv2 weights
         tensor(m,{12},fp16),                               // 9 conv2 bias
         scalar(m,1,10),scalar(m,1,11),scalar(m,1,12),scalar(m,0,13), // SAME/stride/NONE
         tensor(m,{1,height,width,12},fp16),                // 14 conv2 output
@@ -233,10 +251,12 @@ static const ANeuralNetworksDevice* findEnn(std::ostringstream& out) {
 }
 
 static void benchmarkOne(const ANeuralNetworksDevice* device,Weights& weights,
-                         uint32_t width,uint32_t height,int measured,bool fp16,bool reusable,std::ostringstream& out) {
-    out<<"\n=== ESPCN "<<(fp16?"FP16 ":"FP32 ")<<(reusable?"REUSABLE ":"FRESH ")<<width<<"x"<<height<<" -> "<<width*2<<"x"<<height*2<<" ===\n";
+                         uint32_t width,uint32_t height,int measured,bool fp16,bool reusable,std::ostringstream& out,
+                         uint32_t features=kFeatures,uint32_t kernel2=3,
+                         const char* tag="ORIGINAL") {
+    out<<"\n=== ESPCN "<<tag<<" "<<(fp16?"FP16 ":"FP32 ")<<(reusable?"REUSABLE ":"FRESH ")<<width<<"x"<<height<<" -> "<<width*2<<"x"<<height*2<<" ===\n";
     Model m;
-    if(!buildModel(m,weights,device,width,height,fp16,out))return;
+    if(!buildModel(m,weights,device,width,height,fp16,features,kernel2,out))return;
     const size_t inCount=size_t(width)*height*3;
     const size_t outCount=inCount*4;
     std::vector<float> input32,output32;
@@ -319,6 +339,38 @@ static void benchmarkOne(const ANeuralNetworksDevice* device,Weights& weights,
     out<<"Nao inclui compilacao nem renderizacao Vulkan/Winlator. Inclui NNAPI compute sincrono.\n";
 }
 
+static std::string runLite(JNIEnv* env,jobject assets,bool full) {
+    std::ostringstream out;
+    out<<"EXYNOS ESPCN v0.5 — ARCHITECTURE ABLATION (NOT RETRAINED)\n";
+    out<<"FP16 reusable + Samsung ENN; 2nd convolution 3x3 -> 1x1, channels 12/8.\n";
+    out<<"Weights are center-cropped/pruned from v0.4, NOT optimized for visual quality.\n";
+    out<<"This measures only inference performance with synthetic input.\n";
+    const ANeuralNetworksDevice* device=findEnn(out);
+    if(!device)return out.str();
+    Weights source;
+    std::string error;
+    if(!loadWeights(env,assets,source,error)){
+        out<<"Failed to load v0.4 source weights: "<<error<<"\n";return out.str();
+    }
+    const Weights lite12=makePrunedWeights(source,12,1);
+    const Weights lite8=makePrunedWeights(source,8,1);
+    out<<"Features count: baseline=12 kernel2=3, lite12=12 kernel2=1, lite8=8 kernel2=1\n";
+    const auto bench=[&](uint32_t w,uint32_t h,int repeats) {
+        benchmarkOne(device,source,w,h,repeats,true,true,out,12,3,"BASELINE_12_K3");
+        // The benchmark only reads model weights; buildModel doesn't mutate them.
+        benchmarkOne(device,const_cast<Weights&>(lite12),w,h,repeats,true,true,out,12,1,"LITE_12_K1");
+        benchmarkOne(device,const_cast<Weights&>(lite8),w,h,repeats,true,true,out,8,1,"LITE_8_K1");
+    };
+    if(full)bench(960,540,7);
+    else {
+        bench(160,90,8);
+        bench(320,180,8);
+        bench(480,270,6);
+    }
+    out<<"\\nNO QUALITY CLAIM: pruned model is an experimental throughput probe. Train and validate a new compatible model before using it to enhance images.\n";
+    return out.str();
+}
+
 static std::string run(JNIEnv* env,jobject assets,bool full) {
     std::ostringstream out;
     out<<"EXYNOS ESPCN 2X v0.4 — FP32, FP16, FP16 REUSABLE (ENN)\n";
@@ -356,5 +408,12 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_exynos_neuralprobe_NativeProbe_runESPCNBenchmark(JNIEnv* env,jclass,
                                                            jobject assets,jboolean full) {
     const std::string result=run(env,assets,full==JNI_TRUE);
+    return env->NewStringUTF(result.c_str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_exynos_neuralprobe_NativeProbe_runLiteBenchmark(JNIEnv* env,jclass,
+                                                          jobject assets,jboolean full) {
+    const std::string result=runLite(env,assets,full==JNI_TRUE);
     return env->NewStringUTF(result.c_str());
 }
