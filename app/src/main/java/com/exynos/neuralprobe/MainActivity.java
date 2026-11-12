@@ -49,7 +49,7 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView intro = new TextView(this);
-        intro.setText("Prova de execução na NPU Samsung ENN pelo NNAPI. Sem root e sem modificar drivers ou clocks. O teste antigo usa pesos fixos. ESPCN v0.5 compara também variantes leves do modelo (segunda convolução 1x1 e 8/12 canais), usando a NPU ENN. Variantes novas ainda não foram treinadas para qualidade visual.");
+        intro.setText("Prova de execução na NPU Samsung ENN pelo NNAPI. Sem root e sem modificar drivers ou clocks. O teste antigo usa pesos fixos. ESPCN v0.6 verifica todas as saídas da NPU, além de comparar variantes leves do modelo (segunda convolução 1x1 e 8/12 canais), usando a NPU ENN. Variantes novas ainda não foram treinadas para qualidade visual.");
         intro.setTextSize(14);
         intro.setPadding(0, 12, 0, 14);
         intro.setTextColor(Color.DKGRAY);
@@ -80,7 +80,7 @@ public class MainActivity extends Activity {
         scroll.addView(logView);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         setContentView(root);
-        addLine("Exynos Neural Probe 0.5 — S24 FE / Android 14");
+        addLine("Exynos Neural Probe 0.6 — S24 FE / Android 14");
         addLine("Execute a identificação antes do teste.\n");
     }
 
