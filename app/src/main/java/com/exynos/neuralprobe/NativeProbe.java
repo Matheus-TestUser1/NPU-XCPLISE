@@ -9,4 +9,5 @@ public final class NativeProbe {
 
     public static native String listDevices();
     public static native String runNNAPITest();
+    public static native String runESPCNBenchmark(android.content.res.AssetManager assets, boolean full);
 }
