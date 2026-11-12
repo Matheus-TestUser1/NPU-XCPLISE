@@ -233,8 +233,8 @@ static const ANeuralNetworksDevice* findEnn(std::ostringstream& out) {
 }
 
 static void benchmarkOne(const ANeuralNetworksDevice* device,Weights& weights,
-                         uint32_t width,uint32_t height,int measured,bool fp16,std::ostringstream& out) {
-    out<<"\n=== ESPCN "<<(fp16?"FP16 ":"FP32 ")<<width<<"x"<<height<<" -> "<<width*2<<"x"<<height*2<<" ===\n";
+                         uint32_t width,uint32_t height,int measured,bool fp16,bool reusable,std::ostringstream& out) {
+    out<<"\n=== ESPCN "<<(fp16?"FP16 ":"FP32 ")<<(reusable?"REUSABLE ":"FRESH ")<<width<<"x"<<height<<" -> "<<width*2<<"x"<<height*2<<" ===\n";
     Model m;
     if(!buildModel(m,weights,device,width,height,fp16,out))return;
     const size_t inCount=size_t(width)*height*3;
@@ -270,19 +270,36 @@ static void benchmarkOne(const ANeuralNetworksDevice* device,Weights& weights,
                            static_cast<void*>(output32.data());
     std::vector<double> times;
     const int warmups=2;
+    ANeuralNetworksExecution* shared=nullptr;
+    if(reusable) {
+        int rc=ANeuralNetworksExecution_create(m.compilation,&shared);
+        if(rc||!shared){out<<"execution_create reusable: "<<statusName(rc)<<"\n";return;}
+        rc=ANeuralNetworksExecution_setInput(shared,0,nullptr,inputPtr,inCount*elementBytes);
+        if(!rc)rc=ANeuralNetworksExecution_setOutput(shared,0,nullptr,outputPtr,outCount*elementBytes);
+        if(!rc)rc=ANeuralNetworksExecution_setReusable(shared,true);
+        if(rc){
+            out<<"reusable nao suportado/preparacao falhou: "<<statusName(rc)<<"\n";
+            ANeuralNetworksExecution_free(shared);
+            return;
+        }
+    }
     for(int n=0;n<warmups+measured;++n) {
-        ANeuralNetworksExecution* execution=nullptr;
-        int rc=ANeuralNetworksExecution_create(m.compilation,&execution);
-        if(rc||!execution){out<<"execution_create: "<<statusName(rc)<<"\n";break;}
-        rc=ANeuralNetworksExecution_setInput(execution,0,nullptr,inputPtr,inCount*elementBytes);
-        if(!rc)rc=ANeuralNetworksExecution_setOutput(execution,0,nullptr,outputPtr,outCount*elementBytes);
+        ANeuralNetworksExecution* execution=shared;
+        int rc=ANEURALNETWORKS_NO_ERROR;
+        if(!reusable) {
+            rc=ANeuralNetworksExecution_create(m.compilation,&execution);
+            if(rc||!execution){out<<"execution_create: "<<statusName(rc)<<"\n";break;}
+            rc=ANeuralNetworksExecution_setInput(execution,0,nullptr,inputPtr,inCount*elementBytes);
+            if(!rc)rc=ANeuralNetworksExecution_setOutput(execution,0,nullptr,outputPtr,outCount*elementBytes);
+        }
         auto start=std::chrono::steady_clock::now();
         if(!rc)rc=ANeuralNetworksExecution_compute(execution);
         auto end=std::chrono::steady_clock::now();
-        ANeuralNetworksExecution_free(execution);
+        if(!reusable)ANeuralNetworksExecution_free(execution);
         if(rc){out<<"Inferencia ciclo "<<n<<": "<<statusName(rc)<<"\n";break;}
         if(n>=warmups)times.push_back(std::chrono::duration<double,std::milli>(end-start).count());
     }
+    if(shared)ANeuralNetworksExecution_free(shared);
     if(times.empty()){out<<"Nenhuma inferencia medida.\n";return;}
     std::sort(times.begin(),times.end());
     const double mean=std::accumulate(times.begin(),times.end(),0.0)/times.size();
@@ -304,7 +321,7 @@ static void benchmarkOne(const ANeuralNetworksDevice* device,Weights& weights,
 
 static std::string run(JNIEnv* env,jobject assets,bool full) {
     std::ostringstream out;
-    out<<"EXYNOS ESPCN 2X v0.3 — comparacao FP32 vs FP16 (ENN)\n";
+    out<<"EXYNOS ESPCN 2X v0.4 — FP32, FP16, FP16 REUSABLE (ENN)\n";
     out<<"2x Conv3x3 (3->12->12), ReLU, DepthToSpace. Pesos armazenados FP16.\n";
     out<<"Entradas sinteticas. Nao e FSR temporal nem jogo real.\n";
     out<<"Sem root, sem alteracao de clocks, sem fallback NNAPI CPU.\n";
@@ -318,13 +335,15 @@ static std::string run(JNIEnv* env,jobject assets,bool full) {
     out<<"Pesos: "<<(weights.w1.size()+weights.b1.size()+weights.w2.size()+weights.b2.size())
        <<" valores FP16 armazenados no asset.\n";
     if(full) {
-        benchmarkOne(device,weights,960,540,5,false,out);
-        benchmarkOne(device,weights,960,540,5,true,out);
+        benchmarkOne(device,weights,960,540,5,false,false,out);
+        benchmarkOne(device,weights,960,540,5,true,false,out);
+        benchmarkOne(device,weights,960,540,5,true,true,out);
     } else {
         for(const auto& item:std::array<std::pair<uint32_t,uint32_t>,3>{{{160,90},{320,180},{480,270}}}) {
             const int measured=item.first==480?5:8;
-            benchmarkOne(device,weights,item.first,item.second,measured,false,out);
-            benchmarkOne(device,weights,item.first,item.second,measured,true,out);
+            benchmarkOne(device,weights,item.first,item.second,measured,false,false,out);
+            benchmarkOne(device,weights,item.first,item.second,measured,true,false,out);
+            benchmarkOne(device,weights,item.first,item.second,measured,true,true,out);
         }
     }
     out<<"\nAVISO: latencia do modelo demonstrativo, nao desempenho final de jogos.\n";
