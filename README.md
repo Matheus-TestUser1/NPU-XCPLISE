@@ -1,48 +1,45 @@
-# Exynos Neural Probe — etapa 1 do Neural Upscaler
+# NPU-XCPLISE — Exynos Neural Probe v0.2
 
-Protótipo Android ARM64, em Java + C++ (NNAPI/NDK), para **testar o driver ENN/NPU do Samsung Galaxy S24 FE** sem root.
+Aplicativo experimental Android (Java + C++/NNAPI) para medir um **upscaler neural ESPCN 2×** usando o acelerador Samsung ENN no Galaxy S24 FE / Exynos 2400e.
 
-> **Status:** código-fonte experimental, ainda não compilado/testado num S24 FE. Não é APK pronto nem integração com Winlator.
+> **Status:** v0.1 testada no aparelho (dispositivo enn, convolução e DepthToSpace funcionando). A v0.2 inclui uma pequena rede realmente treinada, mas **os novos testes ainda precisam ser executados no S24 FE**. Não é um módulo de upscaling do Winlator pronto.
 
-## Faz agora
+## Funcionalidades
 
-- Lista dispositivos NNAPI, nomes, tipos e versões.
-- Seleciona exclusivamente um acelerador cujo nome pareça Samsung/ENN/Exynos/NPU.
-- Verifica suporte às operações `CONV_2D` e `DEPTH_TO_SPACE`.
-- Compila o grafo apenas nesse acelerador, **sem fallback para CPU**.
-- Executa 5 warmups + 30 inferências e mede média, mediana e mínimo/máximo em ms.
-- Valida uma saída RGB de `8×8` para `16×16` (2×) e exporta `.txt` pelo seletor de arquivos.
+- Identificação de aceleradores NNAPI (tipo, nome e versão).
+- Teste de referência 8×8 → 16×16, com pesos fixos (v0.1).
+- ESPCN 2× demonstrativo treinado: 2 convoluções 3×3, canais 3→12→12, ReLU e DepthToSpace.
+- Benchmarks de 160×90→320×180, 320×180→640×360 e 480×270→960×540.
+- Benchmark separado de 960×540→1920×1080; pode consumir dezenas de MB e falhar se o driver não suportar o grafo.
+- Métricas: operações suportadas, tempo de compilação, tempo de NNAPI compute (média/p50/p90), quantidade de saídas finitas, bytes de entrada e saída.
+- Exportação do relatório para TXT e seleção explícita do acelerador 'enn', sem fallback NNAPI automático para CPU.
 
-### Limites
+## Compilação e instalação
 
-O grafo é um **ensaio de execução com pesos fixos**, equivalente a replicação de pixels. Ainda não usa uma rede neural treinada, não melhora detalhes como EDSR e não tem ponte com Vulkan/Winlator. Os tempos obtidos **não** representam quadros 540p ou 1080p.
+1. Acesse a aba **Actions → Compilar APK de diagnóstico**.
+2. Escolha a execução mais recente da branch main, ou use **Run workflow**.
+3. Após sucesso, baixe **Artifacts → ExynosNeuralProbe-debug-apk**, extraia e instale o app-debug.apk.
+4. Abra no S24 FE. Execute **Identificar aceleradores**, depois **ESPCN 2× — 90p / 180p / 270p**.
+5. Se o teste leve concluir, execute separadamente **ESPCN 2× — 540p → 1080p (pesado)**.
+6. Exporte o relatório TXT para analisar a latência.
 
-## Como compilar com GitHub Actions (sem Android Studio)
+Build: Gradle 8.7, AGP 8.5.2, JDK 17, Android SDK 35, NDK 26.3.11579264, CMake 3.22.1.
 
-1. Crie um repositório próprio no GitHub.
-2. Envie o conteúdo desta pasta para a raiz do repositório, incluindo `.github/workflows/build-apk.yml`.
-3. Vá em **Actions → Compilar APK de diagnóstico → Run workflow**.
-4. Após a execução, baixe o artefato `ExynosNeuralProbe-debug-apk`, extraia o `app-debug.apk` e instale no S24 FE.
-5. No aplicativo, toque em **Identificar aceleradores**, depois em **Executar testes NPU / 2x**, e então em **Exportar relatório .TXT**.
-6. Compartilhe o `.txt` na conversa para identificarmos operações suportadas e tempos reais.
+## Modelo neural
 
-O workflow prepara Gradle 8.7, JDK 17, Android SDK 35 e NDK 26.3.11579264. Pode haver ajustes de compilação após o primeiro CI; envie o log se houver falha.
+O modelo experimental foi treinado usando PyTorch e algumas imagens de exemplo do scikit-image, sem alterar nem extrair os modelos proprietários da Samsung.
 
-## Como compilar no Android Studio
+- Script: tools/train_espcn.py (execução: python tools/train_espcn.py --steps 700).
+- Pesos: app/src/main/assets/espcn2x_fp16.b64.
+- Layout de filtros: PyTorch OIHW convertido para NNAPI OHWI.
+- Origem dos pesos: treino demonstrativo com reconstrução espacial RGB 2×.
+- Em uma única imagem de validação (rocket), o modelo obteve ~30,12 dB de PSNR contra ~29,84 dB da interpolação bicúbica. **Isso não prova qualidade superior em outros conteúdos e não representa jogos.**
+- Entradas dos testes Android são sintéticas e os benchmarks não processam uma imagem escolhida pelo usuário.
 
-Abra a pasta como projeto Gradle e instale SDK 35, NDK 26.3.11579264 e CMake 3.22.1. Compile `app` e execute no S24 FE Android 14.
+## Limitações importantes
 
-## Próximas etapas
+O tempo de NNAPI compute não corresponde à latência total de um jogo. Não inclui o compositor Winlator, DMA-BUF, cópias GPU/NPU, sincronização Vulkan, nem qualidade temporal. Mesmo restringindo ao driver NNAPI enn, não é possível comprovar como o fornecedor distribui operações entre GNPU/SNPU/UNPU internamente.
 
-1. Selecionar um modelo 2× treinado e compatível com Exynos 2400e (ENN/NNC ou NNAPI).
-2. Confirmar a execução **na NPU**, não em CPU/GPU, e medir latência por imagem 540p → 1080p.
-3. Integrar AHardwareBuffer/DMABUF e sincronização para reduzir cópias.
-4. Criar uma camada de pós-processamento nativa para o Winlator/Bannerlator; medir latência fim a fim, energia e qualidade.
+Este projeto **não tem integração Winlator/RADV concluída**, não fornece FSR, DLSS nem frame generation. Precisamos medir inferência em resoluções reais antes de planejar a ponte Vulkan.
 
-## Fontes de referência
-
-- Android NNAPI: https://developer.android.com/ndk/guides/neuralnetworks
-- Samsung ENN samples: https://github.com/exynos-eco/enn-sdk-samples
-- MLPerf Mobile: https://github.com/mlcommons/mobile_app_open
-
-Não altera `/sys`, `/dev` nem modelos Samsung; não precisa de KernelSU.
+Referências: https://developer.android.com/ndk/guides/neuralnetworks · https://github.com/exynos-eco/enn-sdk-samples · https://github.com/mlcommons/mobile_app_open
