@@ -9,9 +9,11 @@
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
+#include <initializer_list>
 #include <numeric>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -77,7 +79,12 @@ static bool loadWeights(JNIEnv* env,jobject javaAssets,Weights& result,std::stri
         AAsset_close(asset);error="Tamanho de modelo invalido";return false;
     }
     std::string encoded(static_cast<size_t>(size),'\0');
-    int received=AAsset_read(asset,&encoded[0],static_cast<size_t>(size));
+    off_t received=0;
+    while(received<size) {
+        int n=AAsset_read(asset,&encoded[static_cast<size_t>(received)],static_cast<size_t>(size-received));
+        if(n<=0)break;
+        received+=n;
+    }
     AAsset_close(asset);
     if(received!=size){error="Erro ao ler modelo";return false;}
     auto bytes=decodeBase64(encoded);
