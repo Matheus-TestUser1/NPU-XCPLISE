@@ -1,6 +1,6 @@
 # Arquitetura NPU — Exynos 2400 / Galaxy S24 FE (2400e)
 
-**Pesquisa em 12/11/2026.** Este documento distingue fatos publicados pela Samsung, fatos observados nos nossos testes e hipóteses de otimização. A configuração pública do Exynos 2400 é usada como referência para o 2400e; não há um manual público completo da microarquitetura do 2400e.
+**Pesquisa em 12/11/2026.** Este documento distingue fatos publicados pela Samsung, fatos observados nos nossos testes e hipóteses de otimização. A Samsung confirmou que o Exynos 2400e usa o mesmo silício do Exynos 2400, alterando o clock máximo da CPU de 3,2 para 3,1 GHz (declaração à Android Authority em 27/09/2024). Por isso, a configuração física da NPU 2400 é fortemente aplicável ao 2400e; ainda falta um manual público completo da microarquitetura e de seu firmware.
 
 ## Informações oficiais
 
@@ -40,3 +40,5 @@ Relatórios reais no S24 FE:
 - Samsung, AI Studio optimization: https://semiconductor.samsung.com/news-events/tech-blog/unpacking-samsungs-comprehensive-on-device-ai-sdk-toolchain-strategy/
 - Samsung, Exynos AI LiteCore: https://soc-developer.semiconductor.samsung.com/global/development/ai-litecore/
 - Android NDK NNAPI reference: https://developer.android.com/ndk/reference/group/neural-networks
+
+- Declaração Samsung sobre silício 2400e (Android Authority): https://www.androidauthority.com/samsung-galaxy-s4-fe-eyxnos-2400e-chip-difference-3485738/
