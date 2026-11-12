@@ -12,7 +12,9 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
       - name: Instalar SDK e NDK
         run: |
           sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "ndk;26.3.11579264" "cmake;3.22.1"
@@ -20,7 +22,7 @@ jobs:
         with:
           gradle-version: '8.7'
       - name: Compilar APK debug
-        run: gradle --no-daemon :app:assembleDebug
+        run: gradle --no-daemon :app:assembleDebug --stacktrace
       - uses: actions/upload-artifact@v4
         with:
           name: ExynosNeuralProbe-debug-apk
