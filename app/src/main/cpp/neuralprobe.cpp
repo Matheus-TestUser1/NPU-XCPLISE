@@ -37,9 +37,9 @@ std::string lower(std::string v) {
 }
 
 bool likelySamsungNpu(const ANeuralNetworksDevice* d) {
-    int32_t type = ANEURALNETWORKS_DEVICE_TYPE_UNKNOWN;
+    int32_t type = ANEURALNETWORKS_DEVICE_UNKNOWN;
     if (ANeuralNetworksDevice_getType(d, &type) != ANEURALNETWORKS_NO_ERROR) return false;
-    if (type == ANEURALNETWORKS_DEVICE_TYPE_CPU) return false;
+    if (type == ANEURALNETWORKS_DEVICE_CPU) return false;
     const std::string name = lower(getName(d));
     return name.find("enn") != std::string::npos ||
            name.find("samsung") != std::string::npos ||
@@ -63,7 +63,7 @@ std::string describeDevices() {
             out << "[" << i << "] erro de descoberta: " << errorCode(rc) << "\n";
             continue;
         }
-        int32_t type = ANEURALNETWORKS_DEVICE_TYPE_UNKNOWN;
+        int32_t type = ANEURALNETWORKS_DEVICE_UNKNOWN;
         ANeuralNetworksDevice_getType(dev, &type);
         const char* version = nullptr;
         ANeuralNetworksDevice_getVersion(dev, &version);
