@@ -1,4 +1,4 @@
-# NPU-XCPLISE — Exynos Neural Probe v0.5
+# NPU-XCPLISE — Exynos Neural Probe v0.6
 
 Aplicativo experimental Android (Java + C++/NNAPI) para medir um **upscaler neural ESPCN 2×** usando o acelerador Samsung ENN no Galaxy S24 FE / Exynos 2400e.
 
@@ -89,3 +89,34 @@ As versões LITE_12_K1 e LITE_8_K1 são **apenas experimentos de arquitetura e t
 O objetivo de 16 ms em 1080p é uma **meta**, não um resultado. A v0.5 ainda não foi compilada/testada no S24 FE. Recomendação: executar o teste leve primeiro e depois o 1080p, e exportar `.txt`. Comparar médias e p50 entre as três opções, observando aquecimento e variação de clock.
 
 O FPS do Winlator exige GPU → NPU → GPU e sincronização; atingir 16 ms **somente na inferência** não garante 60 FPS finais. A API NNAPI foi depreciada no Android 15, mas o aparelho Android 14 com driver enn continua servindo como base experimental. Futuramente avaliar Exynos AI LiteCore / Exynos AI Studio e arquitetura mais adequada ao hardware Samsung.
+
+
+## v0.5 resultados reais no S24 FE — AVISO DE CORREÇÃO
+
+Teste 960×540→1920×1080 com FP16 e execução reutilizável:
+
+| Arquitetura | Média de inferência | Resultado de amostragem |
+|---|---:|---|
+| BASELINE_12_K3 | 21,549 ms | Amostras finitas 2049/2049 |
+| LITE_12_K1 | 16,399 ms | Amostras finitas 2049/2049, p90 18,291 ms |
+| LITE_8_K1 | 13,653 ms | **Amostras finitas 1534/2049**, valores chegando a 10.000 e negativos extremos — resultado inválido |
+
+**A variante LITE_8_K1 NÃO está aprovada**, pois o benchmark terminou mas a saída apresentou indícios de corrupção/incompatibilidade numérica. Estar abaixo de 16 ms não significa que produz imagem válida. A variante LITE_12_K1 é candidata a treinamento após comprovação de integridade completa e qualidade visual.
+
+### v0.6 — verificação integral do tensor de saída
+
+Depois de rodar cada variante, a v0.6 percorre **todos os valores** do tensor RGB, em vez de amostrar aproximadamente 2.048 componentes, e registra:
+
+- quantidade de valores finitos e não finitos;
+- sentinelas NaN FP16 ainda presentes (detectam possíveis componentes não escritos no último quadro);
+- quantidade de valores com módulo acima de 2 (anomalia indicativa para entradas normalizadas, não uma prova universal de erro);
+- coordenada e canal da primeira saída suspeita;
+- `VALIDACAO_NUMERICA=SEM_ANOMALIAS_BASICAS` ou `FALHA`.
+
+A saída é preenchida com sentinelas antes da **última inferência**, fora do cronômetro. A verificação integral ocorre **após** a medição, para não contaminar diretamente a latência de NNAPI compute. Ainda assim, o preenchimento tem custo de memória/energia e pode afetar indiretamente as frequências; repetir várias rodadas sob temperaturas semelhantes é recomendável.
+
+**Validação numérica básica não mede fidelidade visual.** Para aprovar uma rede neural de verdade faltam comparar contra saída CPU e imagens de referência, medir PSNR/SSIM e treinar os pesos da nova topologia. Não há afirmação de que a NPU usa todos os seus motores internos.
+
+### Como testar
+
+Instale a v0.6 quando o Actions compilar com sucesso, execute os botões Lite 5 e 6, exporte o TXT e compare os novos contadores de integridade. Repetir o 1080p em ambiente termicamente estável ajuda a comparar a latência.
