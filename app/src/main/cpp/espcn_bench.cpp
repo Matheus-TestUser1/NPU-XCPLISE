@@ -367,7 +367,7 @@ static std::string runLite(JNIEnv* env,jobject assets,bool full) {
         bench(320,180,8);
         bench(480,270,6);
     }
-    out<<"\\nNO QUALITY CLAIM: pruned model is an experimental throughput probe. Train and validate a new compatible model before using it to enhance images.\n";
+    out<<"\nNO QUALITY CLAIM: pruned model is an experimental throughput probe. Train and validate a new compatible model before using it to enhance images.\n";
     return out.str();
 }
 
